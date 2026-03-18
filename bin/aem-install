@@ -1,0 +1,65 @@
+#!/bin/bash
+set -euo pipefail
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+usage() {
+  cat <<'USAGE'
+Usage: aem-install <artifact.zip|bundle.jar> [installer options...]
+       aem-install help
+
+Dispatches to the appropriate AEM installer based on file extension:
+  .zip -> aem-package-install
+  .jar -> aem-bundle-install
+
+Examples:
+  aem-install my-package.zip
+  aem-install my-bundle.jar
+  aem-install --dry-run my-package.zip
+  aem-install --no-refresh my-bundle.jar
+  aem-install -p 4502 my-package.zip
+
+Notes:
+  - Most options are passed through to the underlying installer.
+  - Use the dedicated command when you want installer-specific help:
+      aem-package-install help
+      aem-bundle-install help
+USAGE
+}
+
+if [[ ${1:-} == "help" || ${1:-} == "--help" || $# -eq 0 ]]; then
+  usage
+  exit $([[ $# -eq 0 ]] && echo 2 || echo 0)
+fi
+
+artifact=""
+for arg in "$@"; do
+  case "$arg" in
+    -*)
+      ;;
+    *)
+      artifact="$arg"
+      break
+      ;;
+  esac
+done
+
+[[ -n "$artifact" ]] || {
+  echo "Error: could not determine artifact path from arguments." >&2
+  usage >&2
+  exit 2
+}
+
+case "$artifact" in
+  *.zip)
+    exec "${script_dir}/aem-package-install" "$@"
+    ;;
+  *.jar)
+    exec "${script_dir}/aem-bundle-install" "$@"
+    ;;
+  *)
+    echo "Error: unsupported artifact type: $artifact" >&2
+    echo "Expected a .zip package or .jar bundle." >&2
+    exit 2
+    ;;
+esac

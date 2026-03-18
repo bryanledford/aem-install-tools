@@ -1,0 +1,389 @@
+#!/bin/bash
+set -euo pipefail
+
+tmp_files=()
+
+cleanup() {
+  local file
+
+  for file in "${tmp_files[@]:-}"; do
+    [[ -n "$file" && -e "$file" ]] && rm -f "$file"
+  done
+}
+
+trap cleanup EXIT
+
+die() {
+  printf 'Error: %s\n' "$*" >&2
+  exit 1
+}
+
+shell_quote() {
+  printf '%q' "$1"
+}
+
+usage() {
+  cat <<'USAGE'
+Usage: aem-bundle-install [--dry-run] [--no-refresh] [--no-start] [--start-level LEVEL] [-p PORT] [-u USER] [-P PASS] [-l] bundle.jar
+       aem-bundle-install help
+
+Installs or updates an OSGi bundle through the Felix Web Console.
+
+Options:
+  --dry-run            Show resolved settings and curl command without executing it.
+  --no-refresh         Do not refresh packages after install/update.
+  --no-start           Do not start newly installed bundles.
+  --start-level LEVEL  Start level for newly installed bundles. Default: 20
+  -p PORT              Target AEM port. If omitted, auto-detect running AEM instances.
+  -u USER              Username. Default: admin
+  -P PASS              Password. Default: admin
+  -l                   List detected AEM ports and exit.
+  -h                   Show help.
+
+Behavior:
+  - If one AEM instance is running, its port is used automatically.
+  - If multiple AEM instances are running in an interactive terminal,
+    a picker is shown with arrow keys and j/k navigation.
+  - The upload/install request uses curl's progress bar when stderr is a TTY.
+  - The Felix endpoint installs new bundles and updates existing bundles
+    based on the uploaded bundle manifest.
+
+Examples:
+  aem-bundle-install my-bundle.jar
+  aem-bundle-install --dry-run my-bundle.jar
+  aem-bundle-install --no-refresh my-bundle.jar
+  aem-bundle-install --no-start --start-level 15 my-bundle.jar
+  aem-bundle-install -p 4502 my-bundle.jar
+  aem-bundle-install -l
+USAGE
+}
+
+is_aem_process_cmd() {
+  local cmd="$1"
+
+  [[ "$cmd" == *java* ]] || return 1
+  [[ "$cmd" =~ quickstart|crx-quickstart|cq-quickstart|sling\.home|sling\.run\.modes|oak\.segment|oak\.tar|aem-.*\.jar|(^|[[:space:]])-p[1-9][0-9]{3,4}([[:space:]]|$)|(^|[[:space:]])-port(=|[[:space:]])[1-9][0-9]{3,4}([[:space:]]|$) ]]
+}
+
+extract_ports_from_cmd() {
+  local cmd="$1"
+
+  printf '%s\n' "$cmd" | grep -oE -- '(^|[[:space:]])-p[1-9][0-9]{3,4}([[:space:]]|$)' | grep -oE '[1-9][0-9]{3,4}' || true
+  printf '%s\n' "$cmd" | grep -oE -- '(^|[[:space:]])-port(=|[[:space:]])[1-9][0-9]{3,4}([[:space:]]|$)' | grep -oE '[1-9][0-9]{3,4}' || true
+  printf '%s\n' "$cmd" | grep -oE -- '[^[:space:]]+-p[1-9][0-9]{3,4}[^[:space:]]*\.jar' | grep -oE '[1-9][0-9]{3,4}' || true
+}
+
+list_listening_ports_for_pid() {
+  local pid="$1"
+
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -Pan -a -p "$pid" -iTCP -sTCP:LISTEN 2>/dev/null | \
+      awk 'NR > 1 { n = split($9, parts, ":"); port = parts[n]; if (port ~ /^[0-9]+$/) print port }'
+  fi
+}
+
+is_probable_aem_port() {
+  local port="$1"
+  local path code
+
+  for path in \
+    /system/console/bundles.json \
+    /crx/packmgr/service/.json \
+    /system/console/status-slingsettings.json; do
+    code="$(curl --globoff -sS -o /dev/null -w '%{http_code}' --max-time 1 "http://127.0.0.1:${port}${path}" || true)"
+    case "$code" in
+      200|302|401|403)
+        return 0
+        ;;
+    esac
+  done
+
+  return 1
+}
+
+list_ports() {
+  local line pid cmd explicit_port port
+
+  ps axww -o pid=,command= | while IFS= read -r line; do
+    pid="${line%% *}"
+    cmd="${line#"$pid"}"
+    cmd="${cmd# }"
+
+    is_aem_process_cmd "$cmd" || continue
+
+    if explicit_port="$(extract_ports_from_cmd "$cmd")" && [[ -n "$explicit_port" ]]; then
+      printf '%s\n' "$explicit_port"
+      continue
+    fi
+
+    while IFS= read -r port; do
+      [[ -n "$port" ]] || continue
+      is_probable_aem_port "$port" && printf '%s\n' "$port"
+    done < <(list_listening_ports_for_pid "$pid")
+  done | sort -u
+}
+
+has_status_tty() {
+  [[ -t 2 ]]
+}
+
+curl_with_progress() {
+  if has_status_tty; then
+    curl --globoff -fS --progress-bar "$@"
+  else
+    curl --globoff -fsS "$@"
+  fi
+}
+
+interactive_pick_port() {
+  local ports=("$@")
+  local selected=0
+  local key=""
+  local key2=""
+  local key3=""
+  local rendered=0
+  local lines=$(( ${#ports[@]} + 2 ))
+  local old_stty
+  local style_reset=$'\033[0m'
+  local style_dim=$'\033[2m'
+  local style_title=$'\033[38;5;120;1m'
+  local style_selected=$'\033[48;5;22m\033[38;5;157m\033[1m'
+  local style_selected_port=$'\033[48;5;22m\033[38;5;194m\033[1m'
+  local style_unselected=$'\033[38;5;114m'
+  local style_hint=$'\033[38;5;108m'
+
+  old_stty="$(stty -g)"
+
+  restore_terminal() {
+    stty "$old_stty"
+    tput cnorm >&2 2>/dev/null || true
+  }
+
+  render_menu() {
+    local i
+
+    if [[ $rendered -eq 1 ]]; then
+      printf '\r\033[%dA\033[J' "$lines" >&2
+    fi
+
+    printf '%sSelect an AEM instance%s %s(up/down, j/k, Enter confirms)%s\n' \
+      "$style_title" "$style_reset" "$style_dim" "$style_reset" >&2
+    for i in "${!ports[@]}"; do
+      if [[ $i -eq $selected ]]; then
+        printf '  %s[ %s%s%s ]  active AEM instance%s\n' \
+          "$style_selected" "$style_selected_port" "${ports[$i]}" "$style_selected" "$style_reset" >&2
+      else
+        printf '  %s  %s%s\n' "$style_unselected" "${ports[$i]}" "$style_reset" >&2
+      fi
+    done
+    printf '%sPress q to cancel.%s\n' "$style_hint" "$style_reset" >&2
+
+    rendered=1
+  }
+
+  trap 'restore_terminal; printf "\n" >&2; exit 130' INT TERM
+  stty -echo -icanon time 1 min 0
+  tput civis >&2 2>/dev/null || true
+
+  render_menu
+
+  while true; do
+    if ! IFS= read -rsn1 key; then
+      continue
+    fi
+
+    case "$key" in
+      ""|$'\n'|$'\r')
+        restore_terminal
+        trap - INT TERM
+        printf '\r\033[%dA\033[J' "$lines" >&2
+        printf '%s\n' "${ports[$selected]}"
+        return
+        ;;
+      j)
+        ((selected < ${#ports[@]} - 1)) && ((selected++))
+        ;;
+      k)
+        ((selected > 0)) && ((selected--))
+        ;;
+      q)
+        restore_terminal
+        trap - INT TERM
+        printf '\r\033[%dA\033[J' "$lines" >&2
+        echo "Selection cancelled." >&2
+        exit 1
+        ;;
+      $'\x1b')
+        IFS= read -rsn1 key2 || true
+        IFS= read -rsn1 key3 || true
+        case "${key2}${key3}" in
+          "[A") ((selected > 0)) && ((selected--)) ;;
+          "[B") ((selected < ${#ports[@]} - 1)) && ((selected++)) ;;
+        esac
+        ;;
+    esac
+
+    render_menu
+  done
+}
+
+pick_port() {
+  local ports=()
+  local port
+
+  while IFS= read -r port; do
+    [[ -n "$port" ]] && ports+=("$port")
+  done < <(list_ports)
+
+  if [[ ${#ports[@]} -eq 0 ]]; then
+    die "No running AEM instances detected via ps output."
+  fi
+
+  if [[ ${#ports[@]} -eq 1 ]]; then
+    printf '%s\n' "${ports[0]}"
+    return
+  fi
+
+  if [[ -t 0 && -t 2 ]]; then
+    interactive_pick_port "${ports[@]}"
+    return
+  fi
+
+  printf 'Multiple running AEM instances detected: %s\n' "${ports[*]}" >&2
+  echo "Pass -p PORT to choose one." >&2
+  exit 1
+}
+
+port=""
+user="admin"
+pass="admin"
+list_only=0
+refresh_packages=true
+bundle_start=true
+bundle_start_level=20
+dry_run=false
+
+if [[ ${1:-} == "help" ]]; then
+  usage
+  exit 0
+fi
+
+if [[ $# -eq 0 ]]; then
+  usage
+  exit 2
+fi
+
+args=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --dry-run)
+      dry_run=true
+      shift
+      ;;
+    --no-refresh)
+      refresh_packages=false
+      shift
+      ;;
+    --no-start)
+      bundle_start=false
+      shift
+      ;;
+    --start-level)
+      [[ $# -ge 2 ]] || die "--start-level requires a value."
+      bundle_start_level="$2"
+      shift 2
+      ;;
+    --help)
+      usage
+      exit 0
+      ;;
+    --)
+      args+=("$1")
+      shift
+      while [[ $# -gt 0 ]]; do
+        args+=("$1")
+        shift
+      done
+      break
+      ;;
+    *)
+      args+=("$1")
+      shift
+      ;;
+  esac
+done
+
+set -- "${args[@]}"
+
+while getopts ":p:u:P:lh" opt; do
+  case "$opt" in
+    p) port="$OPTARG" ;;
+    u) user="$OPTARG" ;;
+    P) pass="$OPTARG" ;;
+    l) list_only=1 ;;
+    h) usage; exit 0 ;;
+    :) printf 'Option -%s requires a value.\n' "$OPTARG" >&2; usage >&2; exit 2 ;;
+    \?) printf 'Unknown option: -%s\n' "$OPTARG" >&2; usage >&2; exit 2 ;;
+  esac
+done
+shift $((OPTIND - 1))
+
+if [[ $list_only -eq 1 ]]; then
+  list_ports
+  exit 0
+fi
+
+if [[ $# -ne 1 ]]; then
+  usage >&2
+  exit 2
+fi
+
+bundle="$1"
+[[ -f "$bundle" ]] || die "Bundle not found: $bundle"
+[[ "$bundle" == *.jar ]] || echo "Warning: bundle does not end with .jar: $bundle" >&2
+[[ "$bundle_start_level" =~ ^[0-9]+$ ]] || die "Invalid start level: $bundle_start_level"
+
+if [[ -z "$port" ]]; then
+  port="$(pick_port)"
+fi
+
+[[ "$port" =~ ^[1-9][0-9]{3,4}$ ]] || die "Invalid port: $port"
+
+base="http://localhost:${port}"
+bundle_url="${base}/system/console/bundles"
+
+if [[ "$dry_run" == true ]]; then
+  printf 'Dry run: no changes will be made.\n' >&2
+  printf 'Resolved bundle: %s\n' "$(shell_quote "$bundle")" >&2
+  printf 'Resolved port: %s\n' "$port" >&2
+  printf 'Refresh packages: %s\n' "$refresh_packages" >&2
+  printf 'Start bundle: %s\n' "$bundle_start" >&2
+  printf 'Start level: %s\n' "$bundle_start_level" >&2
+  printf 'Bundle URL: %s\n' "$bundle_url" >&2
+  printf 'Install command:\n' >&2
+  printf '  curl --globoff -u %s -X POST -F action=install -F refreshPackages=%s -F bundlestart=%s -F bundlestartlevel=%s -F bundlefile=@%s %s\n' \
+    "$(shell_quote "$user:$pass")" \
+    "$refresh_packages" \
+    "$bundle_start" \
+    "$bundle_start_level" \
+    "$(shell_quote "$bundle")" \
+    "$(shell_quote "$bundle_url")" >&2
+  exit 0
+fi
+
+echo "Uploading and installing bundle to AEM on port ${port}..." >&2
+bundle_resp="$(curl_with_progress -u "$user:$pass" -X POST \
+  -F action=install \
+  -F refreshPackages="$refresh_packages" \
+  -F bundlestart="$bundle_start" \
+  -F bundlestartlevel="$bundle_start_level" \
+  -F bundlefile=@"$bundle" \
+  "$bundle_url")"
+
+if printf '%s' "$bundle_resp" | grep -qiE '"error"|<title>.*error'; then
+  echo "Bundle install may have failed." >&2
+  echo "$bundle_resp" >&2
+  exit 1
+fi
+
+echo "Installed or updated bundle on AEM port ${port}: $(basename "$bundle")"
