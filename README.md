@@ -25,8 +25,9 @@ AEM package and bundle installs are common development tasks, but the default br
 
 ## Features
 
-- Auto-detects running local AEM instances from `quickstart.jar` process arguments.
+- Auto-detects running local AEM instances from `quickstart.jar` process arguments and Docker-published host ports.
 - Offers an interactive instance picker with arrow keys and `j`/`k`.
+- Labels detected instances by source so mixed local and Docker setups are easier to distinguish.
 - Shows upload progress in interactive terminals.
 - Supports `--dry-run` for request inspection and safer debugging.
 - Prints built-in usage/help when invoked incorrectly.
@@ -80,12 +81,26 @@ aem-bundle-install --dry-run my-bundle.jar
 - Installs content packages in extract-only mode.
 - Extracts subpackages by default.
 - Use `--shallow` to disable subpackage extraction.
+- If `-p` is omitted, detects host-local AEM instances from local JVM processes and Docker-published host ports.
 
 ### `aem-bundle-install`
 
 - Uploads bundles to `/system/console/bundles`.
 - Supports refresh and bundle start toggles.
 - Supports configurable start level for newly installed bundles.
+- If `-p` is omitted, detects host-local AEM instances from local JVM processes and Docker-published host ports.
+
+## Instance Detection
+
+- Local AEM quickstarts are detected from running Java processes and their listening ports.
+- Dockerized AEM instances are detected from running containers with published ports on the host.
+- Docker detection uses the host-mapped port, not the container's internal AEM port.
+- Every detected port is confirmed with lightweight AEM HTTP probes before it is shown in the picker or used automatically.
+- Detection probes stay silent during discovery, even if a candidate port resets or refuses a connection.
+- Detected instances are sorted numerically by port before they are listed.
+- Picker and multi-instance output label each detected port as `local` or `docker`.
+
+For example, if Docker publishes `14502->4502`, the installer will display and target `14502`.
 
 ## Design Principles
 
@@ -104,6 +119,7 @@ aem-bundle-install --dry-run my-bundle.jar
 
 - Bash
 - `curl`
+- `docker` if you want Dockerized AEM instances to be auto-detected
 - `ps`
 - `sed`
 - `sort`

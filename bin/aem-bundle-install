@@ -82,6 +82,21 @@ list_listening_ports_for_pid() {
   fi
 }
 
+list_docker_entries() {
+  local container_id line host_port
+
+  command -v docker >/dev/null 2>&1 || return 0
+  docker ps --format '{{.ID}}' 2>/dev/null | while IFS= read -r container_id; do
+    [[ -n "$container_id" ]] || continue
+
+    docker port "$container_id" 2>/dev/null | while IFS= read -r line; do
+      host_port="$(printf '%s\n' "$line" | sed -nE 's/.*:([0-9]+)$/\1/p')"
+      [[ -n "$host_port" ]] || continue
+      is_probable_aem_port "$host_port" && printf '%s\t%s\n' "$host_port" "docker"
+    done
+  done
+}
+
 is_probable_aem_port() {
   local port="$1"
   local path code
@@ -90,7 +105,7 @@ is_probable_aem_port() {
     /system/console/bundles.json \
     /crx/packmgr/service/.json \
     /system/console/status-slingsettings.json; do
-    code="$(curl --globoff -sS -o /dev/null -w '%{http_code}' --max-time 1 "http://127.0.0.1:${port}${path}" || true)"
+    code="$(curl --globoff -s -o /dev/null -w '%{http_code}' --max-time 1 "http://127.0.0.1:${port}${path}" 2>/dev/null || true)"
     case "$code" in
       200|302|401|403)
         return 0
@@ -101,7 +116,7 @@ is_probable_aem_port() {
   return 1
 }
 
-list_ports() {
+list_process_entries() {
   local line pid cmd explicit_port port
 
   ps axww -o pid=,command= | while IFS= read -r line; do
@@ -112,15 +127,38 @@ list_ports() {
     is_aem_process_cmd "$cmd" || continue
 
     if explicit_port="$(extract_ports_from_cmd "$cmd")" && [[ -n "$explicit_port" ]]; then
-      printf '%s\n' "$explicit_port"
+      while IFS= read -r port; do
+        [[ -n "$port" ]] && printf '%s\t%s\n' "$port" "local"
+      done < <(printf '%s\n' "$explicit_port")
       continue
     fi
 
     while IFS= read -r port; do
       [[ -n "$port" ]] || continue
-      is_probable_aem_port "$port" && printf '%s\n' "$port"
+      is_probable_aem_port "$port" && printf '%s\t%s\n' "$port" "local"
     done < <(list_listening_ports_for_pid "$pid")
-  done | sort -u
+  done
+}
+
+list_ports() {
+  {
+    list_process_entries
+    list_docker_entries
+  } | sort -t $'\t' -k1,1n -k2,2 | awk -F '\t' '!seen[$1]++'
+}
+
+entry_port() {
+  printf '%s\n' "${1%%$'\t'*}"
+}
+
+entry_label() {
+  local entry="$1"
+
+  if [[ "$entry" == *$'\t'* ]]; then
+    printf '%s\n' "${entry#*$'\t'}"
+  else
+    printf 'local\n'
+  fi
 }
 
 has_status_tty() {
@@ -136,20 +174,22 @@ curl_with_progress() {
 }
 
 interactive_pick_port() {
-  local ports=("$@")
+  local entries=("$@")
   local selected=0
   local key=""
   local key2=""
   local key3=""
   local rendered=0
-  local lines=$(( ${#ports[@]} + 2 ))
+  local lines=$(( ${#entries[@]} + 2 ))
   local old_stty
   local style_reset=$'\033[0m'
   local style_dim=$'\033[2m'
   local style_title=$'\033[38;5;120;1m'
   local style_selected=$'\033[48;5;22m\033[38;5;157m\033[1m'
   local style_selected_port=$'\033[48;5;22m\033[38;5;194m\033[1m'
+  local style_selected_label=$'\033[48;5;22m\033[38;5;151m'
   local style_unselected=$'\033[38;5;114m'
+  local style_label=$'\033[38;5;108m'
   local style_hint=$'\033[38;5;108m'
 
   old_stty="$(stty -g)"
@@ -160,7 +200,7 @@ interactive_pick_port() {
   }
 
   render_menu() {
-    local i
+    local i port label
 
     if [[ $rendered -eq 1 ]]; then
       printf '\r\033[%dA\033[J' "$lines" >&2
@@ -168,12 +208,17 @@ interactive_pick_port() {
 
     printf '%sSelect an AEM instance%s %s(up/down, j/k, Enter confirms)%s\n' \
       "$style_title" "$style_reset" "$style_dim" "$style_reset" >&2
-    for i in "${!ports[@]}"; do
+    for i in "${!entries[@]}"; do
+      port="$(entry_port "${entries[$i]}")"
+      label="$(entry_label "${entries[$i]}")"
       if [[ $i -eq $selected ]]; then
-        printf '  %s[ %s%s%s ]  active AEM instance%s\n' \
-          "$style_selected" "$style_selected_port" "${ports[$i]}" "$style_selected" "$style_reset" >&2
+        printf '  %s[ %s%s%s ]  %s%s%s  active AEM instance%s\n' \
+          "$style_selected" "$style_selected_port" "$port" "$style_selected" \
+          "$style_selected_label" "$label" "$style_selected" "$style_reset" >&2
       else
-        printf '  %s  %s%s\n' "$style_unselected" "${ports[$i]}" "$style_reset" >&2
+        printf '  %s  %s%s  %s[%s]%s\n' \
+          "$style_unselected" "$port" "$style_reset" \
+          "$style_label" "$label" "$style_reset" >&2
       fi
     done
     printf '%sPress q to cancel.%s\n' "$style_hint" "$style_reset" >&2
@@ -197,11 +242,11 @@ interactive_pick_port() {
         restore_terminal
         trap - INT TERM
         printf '\r\033[%dA\033[J' "$lines" >&2
-        printf '%s\n' "${ports[$selected]}"
+        printf '%s\n' "$(entry_port "${entries[$selected]}")"
         return
         ;;
       j)
-        ((selected < ${#ports[@]} - 1)) && ((selected++))
+        ((selected < ${#entries[@]} - 1)) && ((selected++))
         ;;
       k)
         ((selected > 0)) && ((selected--))
@@ -218,7 +263,7 @@ interactive_pick_port() {
         IFS= read -rsn1 key3 || true
         case "${key2}${key3}" in
           "[A") ((selected > 0)) && ((selected--)) ;;
-          "[B") ((selected < ${#ports[@]} - 1)) && ((selected++)) ;;
+          "[B") ((selected < ${#entries[@]} - 1)) && ((selected++)) ;;
         esac
         ;;
     esac
@@ -228,28 +273,33 @@ interactive_pick_port() {
 }
 
 pick_port() {
-  local ports=()
-  local port
+  local entries=()
+  local entry
+  local summary=()
 
-  while IFS= read -r port; do
-    [[ -n "$port" ]] && ports+=("$port")
+  while IFS= read -r entry; do
+    [[ -n "$entry" ]] && entries+=("$entry")
   done < <(list_ports)
 
-  if [[ ${#ports[@]} -eq 0 ]]; then
-    die "No running AEM instances detected via ps output."
+  if [[ ${#entries[@]} -eq 0 ]]; then
+    die "No running AEM instances detected via local processes or Docker-published ports."
   fi
 
-  if [[ ${#ports[@]} -eq 1 ]]; then
-    printf '%s\n' "${ports[0]}"
+  if [[ ${#entries[@]} -eq 1 ]]; then
+    printf '%s\n' "$(entry_port "${entries[0]}")"
     return
   fi
 
   if [[ -t 0 && -t 2 ]]; then
-    interactive_pick_port "${ports[@]}"
+    interactive_pick_port "${entries[@]}"
     return
   fi
 
-  printf 'Multiple running AEM instances detected: %s\n' "${ports[*]}" >&2
+  while IFS= read -r entry; do
+    summary+=("$(entry_port "$entry") ($(entry_label "$entry"))")
+  done < <(printf '%s\n' "${entries[@]}")
+
+  printf 'Multiple running AEM instances detected: %s\n' "${summary[*]}" >&2
   echo "Pass -p PORT to choose one." >&2
   exit 1
 }
