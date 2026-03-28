@@ -95,7 +95,9 @@ list_docker_entries() {
       [[ -n "$host_port" ]] || continue
       is_probable_aem_port "$host_port" && printf '%s\t%s\n' "$host_port" "docker"
     done
-  done
+  done || true
+
+  return 0
 }
 
 is_probable_aem_port() {
@@ -106,7 +108,7 @@ is_probable_aem_port() {
     /system/console/bundles.json \
     /crx/packmgr/service/.json \
     /system/console/status-slingsettings.json; do
-    code="$(curl --globoff -s -o /dev/null -w '%{http_code}' --max-time 1 "http://127.0.0.1:${port}${path}" 2>/dev/null || true)"
+    code="$(curl --globoff -s -u admin:admin -o /dev/null -w '%{http_code}' --max-time 1 "http://127.0.0.1:${port}${path}" 2>/dev/null || true)"
     case "$code" in
       200|302|401|403)
         return 0
@@ -138,14 +140,18 @@ list_process_entries() {
       [[ -n "$port" ]] || continue
       is_probable_aem_port "$port" && printf '%s\t%s\n' "$port" "local"
     done < <(list_listening_ports_for_pid "$pid")
-  done
+  done || true
+
+  return 0
 }
 
 list_ports() {
   {
     list_process_entries
     list_docker_entries
-  } | sort -t $'\t' -k1,1n -k2,2 | awk -F '\t' '!seen[$1]++'
+  } | sort -t $'\t' -k1,1n -k2,2 | awk -F '\t' '!seen[$1]++' || true
+
+  return 0
 }
 
 entry_port() {
