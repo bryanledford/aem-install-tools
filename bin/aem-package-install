@@ -190,8 +190,27 @@ url_encode() {
   printf '%s\n' "$output"
 }
 
+require_commands() {
+  local cmd
+  for cmd in curl mktemp ps sed sort; do
+    command -v "$cmd" >/dev/null 2>&1 || die "Required command not found: $cmd"
+  done
+}
+
 has_status_tty() {
   [[ -t 2 ]]
+}
+
+has_tui_support() {
+  [[ -t 0 && -t 2 ]] || return 1
+  command -v stty >/dev/null 2>&1 || return 1
+  return 0
+}
+
+supports_color() {
+  [[ -t 2 ]] || return 1
+  [[ "${TERM:-}" != "dumb" ]] || return 1
+  return 0
 }
 
 curl_with_progress() {
@@ -245,21 +264,33 @@ interactive_pick_port() {
   local rendered=0
   local lines=$(( ${#entries[@]} + 2 ))
   local old_stty
-  local style_reset=$'\033[0m'
-  local style_dim=$'\033[2m'
-  local style_title=$'\033[38;5;120;1m'
-  local style_selected=$'\033[48;5;22m\033[38;5;157m\033[1m'
-  local style_selected_port=$'\033[48;5;22m\033[38;5;194m\033[1m'
-  local style_selected_label=$'\033[48;5;22m\033[38;5;151m'
-  local style_unselected=$'\033[38;5;114m'
-  local style_label=$'\033[38;5;108m'
-  local style_hint=$'\033[38;5;108m'
+  local style_reset=""
+  local style_dim=""
+  local style_title=""
+  local style_selected=""
+  local style_selected_port=""
+  local style_selected_label=""
+  local style_unselected=""
+  local style_label=""
+  local style_hint=""
+
+  if supports_color; then
+    style_reset=$'\033[0m'
+    style_dim=$'\033[2m'
+    style_title=$'\033[38;5;120;1m'
+    style_selected=$'\033[48;5;22m\033[38;5;157m\033[1m'
+    style_selected_port=$'\033[48;5;22m\033[38;5;194m\033[1m'
+    style_selected_label=$'\033[48;5;22m\033[38;5;151m'
+    style_unselected=$'\033[38;5;114m'
+    style_label=$'\033[38;5;108m'
+    style_hint=$'\033[38;5;108m'
+  fi
 
   old_stty="$(stty -g)"
 
   restore_terminal() {
     stty "$old_stty"
-    tput cnorm >&2 2>/dev/null || true
+    command -v tput >/dev/null 2>&1 && tput cnorm >&2 2>/dev/null || true
   }
 
   render_menu() {
@@ -291,7 +322,7 @@ interactive_pick_port() {
 
   trap 'restore_terminal; printf "\n" >&2; exit 130' INT TERM
   stty -echo -icanon time 1 min 0
-  tput civis >&2 2>/dev/null || true
+  command -v tput >/dev/null 2>&1 && tput civis >&2 2>/dev/null || true
 
   render_menu
 
@@ -354,7 +385,7 @@ pick_port() {
     return
   fi
 
-  if [[ -t 0 && -t 2 ]]; then
+  if has_tui_support; then
     interactive_pick_port "${entries[@]}"
     return
   fi
@@ -367,6 +398,8 @@ pick_port() {
   echo "Pass -p PORT to choose one." >&2
   exit 1
 }
+
+require_commands
 
 port=""
 user="admin"
