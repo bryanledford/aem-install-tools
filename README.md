@@ -62,6 +62,7 @@ aem-install my-package.zip
 aem-install my-bundle.jar
 
 aem-package-install --shallow my-package.zip
+aem-package-install --disable-workflows my-package.zip
 aem-bundle-install --no-refresh --start-level 15 my-bundle.jar
 
 aem-package-install --dry-run my-package.zip
@@ -81,6 +82,7 @@ aem-bundle-install --dry-run my-bundle.jar
 - Installs content packages in extract-only mode.
 - Extracts subpackages by default.
 - Use `--shallow` to disable subpackage extraction.
+- Use `--disable-workflows` to disable `WorkflowLauncherImpl` and `WorkflowLauncherListener` via the OSGi console before upload and re-enable them after install completes. Useful when installing content packages with already-processed assets to avoid unnecessary background processing.
 - If `-p` is omitted, detects host-local AEM instances from local JVM processes and Docker-published host ports.
 
 ### `aem-bundle-install`
@@ -128,6 +130,21 @@ For example, if Docker publishes `14502->4502`, the installer will display and t
 
 The core commands still work without a rich terminal, but the interactive picker and styling depend on a TTY.
 
+## Shell Completions
+
+Source the completion script for bash or zsh:
+
+```bash
+# bash — add to ~/.bashrc or ~/.bash_profile
+source /path/to/aem-tools/completions/aem-tools-completion.bash
+
+# zsh — add to ~/.zshrc
+autoload -U +X bashcompinit && bashcompinit
+source /path/to/aem-tools/completions/aem-tools-completion.bash
+```
+
+Completions cover flags and file filtering (`.zip` for package installs, `.jar` for bundle installs) for all three commands.
+
 ## Project Layout
 
 ```text
@@ -136,6 +153,8 @@ aem-tools/
     aem-install
     aem-package-install
     aem-bundle-install
+  completions/
+    aem-tools-completion.bash
   CHANGELOG.md
   CONTRIBUTING.md
   LICENSE
@@ -155,7 +174,6 @@ If `shellcheck` is not installed, syntax checking with `bash -n` is still a mini
 
 ## Roadmap
 
-- Shell completion support
 - Automated smoke tests around argument parsing and dispatch
 - Better Linux packaging and install instructions
 - Release tags and GitHub metadata

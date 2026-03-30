@@ -26,20 +26,21 @@ shell_quote() {
 
 usage() {
   cat <<'USAGE'
-Usage: aem-package-install [--dry-run] [--shallow] [-p PORT] [-u USER] [-P PASS] [-l] package.zip
+Usage: aem-package-install [--dry-run] [--shallow] [--disable-workflows] [-p PORT] [-u USER] [-P PASS] [-l] package.zip
        aem-package-install help
 
 Installs an AEM content package using Package Manager with Extract Only,
 so no snapshot is created.
 
 Options:
-  --dry-run  Show resolved settings and curl commands without executing them.
-  --shallow  Do not extract embedded subpackages.
-  -p PORT   Target AEM port. If omitted, auto-detect running AEM instances.
-  -u USER   Username. Default: admin
-  -P PASS   Password. Default: admin
-  -l        List detected AEM ports and exit.
-  -h        Show help.
+  --dry-run            Show resolved settings and curl commands without executing them.
+  --shallow            Do not extract embedded subpackages.
+  --disable-workflows  Disable workflow launchers before install and re-enable after.
+  -p PORT              Target AEM port. If omitted, auto-detect running AEM instances.
+  -u USER              Username. Default: admin
+  -P PASS              Password. Default: admin
+  -l                   List detected AEM ports and exit.
+  -h                   Show help.
 
 Behavior:
   - If one AEM instance is running, its port is used automatically.
@@ -48,11 +49,15 @@ Behavior:
   - Subpackages are extracted by default; pass --shallow to disable that.
   - Upload uses curl's progress bar when stderr is a TTY.
   - Install shows a spinner with elapsed time while AEM processes the package.
+  - --disable-workflows disables WorkflowLauncherImpl and WorkflowLauncherListener
+    via the OSGi console before upload and re-enables them after install completes.
+    Useful when installing content packages with already-processed assets.
 
 Examples:
   aem-package-install my-package.zip
   aem-package-install --dry-run my-package.zip
   aem-package-install --shallow my-package.zip
+  aem-package-install --disable-workflows my-package.zip
   aem-package-install -p 4502 my-package.zip
   aem-package-install -u admin -P admin my-package.zip
   aem-package-install -l
@@ -369,6 +374,7 @@ pass="admin"
 list_only=0
 recursive=true
 dry_run=false
+disable_workflows=false
 
 if [[ ${1:-} == "help" ]]; then
   usage
@@ -389,6 +395,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --shallow)
       recursive=false
+      shift
+      ;;
+    --disable-workflows)
+      disable_workflows=true
       shift
       ;;
     --help)
@@ -448,11 +458,30 @@ fi
 base="http://localhost:${port}"
 upload_url="${base}/crx/packmgr/service/.json"
 
+_workflow_launcher_components=(
+  "com.adobe.granite.workflow.core.launcher.WorkflowLauncherImpl"
+  "com.adobe.granite.workflow.core.launcher.WorkflowLauncherListener"
+)
+
+toggle_workflow_launchers() {
+  local action="$1"
+  local label
+  label="$(printf '%s' "$action" | sed 's/./\u&/')"
+  local component
+  for component in "${_workflow_launcher_components[@]}"; do
+    curl -sf -u "$user:$pass" \
+      "http://localhost:${port}/system/console/components/${component}" \
+      --data "action=${action}" >/dev/null \
+      || printf 'Warning: could not %s %s\n' "$action" "$component" >&2
+  done
+}
+
 if [[ "$dry_run" == true ]]; then
   printf 'Dry run: no changes will be made.\n' >&2
   printf 'Resolved package: %s\n' "$(shell_quote "$pkg")" >&2
   printf 'Resolved port: %s\n' "$port" >&2
   printf 'Recursive install: %s\n' "$recursive" >&2
+  printf 'Disable workflows: %s\n' "$disable_workflows" >&2
   printf 'Upload URL: %s\n' "$upload_url" >&2
   printf 'Upload command:\n' >&2
   printf '  curl --globoff -u %s -F cmd=upload -F force=true -F package=@%s %s\n' \
@@ -465,6 +494,12 @@ if [[ "$dry_run" == true ]]; then
     "$recursive" \
     "$(shell_quote "${base}/crx/packmgr/service/.json")" >&2
   exit 0
+fi
+
+if [[ "$disable_workflows" == true ]]; then
+  printf 'Disabling workflow launchers...\n' >&2
+  toggle_workflow_launchers disable
+  trap 'printf "Re-enabling workflow launchers...\n" >&2; toggle_workflow_launchers enable' EXIT
 fi
 
 echo "Uploading package to AEM on port ${port}..." >&2
