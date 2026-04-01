@@ -22,12 +22,17 @@ AEM package and bundle installs are common development tasks, but the default br
   Installs AEM content packages using Package Manager in extract-only mode.
 - `aem-bundle-install`
   Installs or updates OSGi bundles through the Felix Web Console.
+- `git-worktree-jump`
+  Interactive picker that prints a selected worktree path so shell wrappers can `cd` there quickly.
+- `git-worktree-remove`
+  Interactive picker for removable worktrees with a follow-up `No / Yes / Force` confirmation.
 
 ## Features
 
 - Auto-detects running local AEM instances from `quickstart.jar` process arguments and Docker-published host ports.
 - Offers an interactive instance picker with arrow keys and `j`/`k`.
 - Labels detected instances by source so mixed local and Docker setups are easier to distinguish.
+- Adds matching interactive Git worktree pickers for navigation and safe removal.
 - Shows upload progress in interactive terminals.
 - Supports `--dry-run` for request inspection and safer debugging.
 - Prints built-in usage/help when invoked incorrectly.
@@ -43,6 +48,8 @@ The simplest local setup is to keep the toolkit under a directory already on you
 ~/bin/aem-tools/bin/aem-install
 ~/bin/aem-tools/bin/aem-package-install
 ~/bin/aem-tools/bin/aem-bundle-install
+~/bin/aem-tools/bin/git-worktree-jump
+~/bin/aem-tools/bin/git-worktree-remove
 ```
 
 You can either call the canonical scripts directly or create wrappers/aliases such as:
@@ -54,6 +61,18 @@ alias aeminstall="$HOME/bin/aem-install"
 ```
 
 `aem-tools/bin` is the canonical source of truth for the project on both macOS and Linux. Any older standalone copies outside this directory should be treated as deprecated compatibility copies.
+
+For the worktree picker, use a shell function rather than a plain alias so the selected path can update your current shell:
+
+```bash
+wt() {
+  local dest
+  dest="$(git-worktree-jump "$@")" || return
+  [[ -n "$dest" ]] && cd "$dest"
+}
+
+alias wtrm="$HOME/bin/git-worktree-remove"
+```
 
 ## Quick Start
 
@@ -67,6 +86,10 @@ aem-bundle-install --no-refresh --start-level 15 my-bundle.jar
 
 aem-package-install --dry-run my-package.zip
 aem-bundle-install --dry-run my-bundle.jar
+
+wt
+git-worktree-jump --sort recent
+git-worktree-remove
 ```
 
 ## Command Behavior
@@ -91,6 +114,22 @@ aem-bundle-install --dry-run my-bundle.jar
 - Supports refresh and bundle start toggles.
 - Supports configurable start level for newly installed bundles.
 - If `-p` is omitted, detects host-local AEM instances from local JVM processes and Docker-published host ports.
+
+### `git-worktree-jump`
+
+- Lists worktrees for the current repository in an interactive picker.
+- Shows each worktree path with its branch in a separate visual style.
+- Prints the selected path to stdout so a shell function can `cd` there.
+- Supports `--sort name` and `--sort recent`.
+- Treats `q` as a clean no-op exit.
+
+### `git-worktree-remove`
+
+- Lists removable worktrees for the current repository.
+- Omits the main worktree and the current worktree from the removal list.
+- Confirms the selected removal with `No`, `Yes`, and `Force`.
+- `Force` maps to `git worktree remove --force`.
+- Treats `q` and `No` as clean no-op exits.
 
 ## Instance Detection
 
@@ -150,9 +189,12 @@ Completions cover flags and file filtering (`.zip` for package installs, `.jar` 
 ```text
 aem-tools/
   bin/
+    _git-worktree-common.sh
     aem-install
     aem-package-install
     aem-bundle-install
+    git-worktree-jump
+    git-worktree-remove
   completions/
     aem-tools-completion.bash
   CHANGELOG.md
@@ -166,8 +208,20 @@ aem-tools/
 For now this project is intentionally lightweight. A solid baseline for changes is:
 
 ```bash
-bash -n bin/aem-install bin/aem-package-install bin/aem-bundle-install
-shellcheck bin/aem-install bin/aem-package-install bin/aem-bundle-install
+bash -n \
+  bin/aem-install \
+  bin/aem-package-install \
+  bin/aem-bundle-install \
+  bin/git-worktree-jump \
+  bin/git-worktree-remove \
+  bin/_git-worktree-common.sh
+shellcheck \
+  bin/aem-install \
+  bin/aem-package-install \
+  bin/aem-bundle-install \
+  bin/git-worktree-jump \
+  bin/git-worktree-remove \
+  bin/_git-worktree-common.sh
 ```
 
 If `shellcheck` is not installed, syntax checking with `bash -n` is still a minimum expectation.

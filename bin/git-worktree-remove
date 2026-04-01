@@ -1,0 +1,166 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=/dev/null
+source "${script_dir}/_git-worktree-common.sh"
+
+trap gwt_cleanup EXIT
+
+schedule_worktree_removal() {
+  local repo_root="$1"
+  local selected_path="$2"
+  local display_path="$3"
+  local remove_mode="$4"
+  local tmux_env="${TMUX:-}"
+  local log_file=""
+
+  command -v nohup >/dev/null 2>&1 || gwt_die "Required command not found: nohup"
+  command -v mktemp >/dev/null 2>&1 || gwt_die "Required command not found: mktemp"
+  command -v bash >/dev/null 2>&1 || gwt_die "Required command not found: bash"
+
+  log_file="$(mktemp "${TMPDIR:-/tmp}/git-worktree-remove-XXXXXX.log")"
+
+  nohup bash -lc '
+repo_root="$1"
+selected_path="$2"
+display_path="$3"
+remove_mode="$4"
+tmux_env="$5"
+log_file="$6"
+
+notify_tmux() {
+  local message="$1"
+  if [[ -n "${tmux_env}" ]] && command -v tmux >/dev/null 2>&1; then
+    TMUX="${tmux_env}" tmux display-message -d 5000 -- "${message}" >/dev/null 2>&1 || true
+  fi
+}
+
+if [[ "${remove_mode}" == "force" ]]; then
+  git -C "${repo_root}" worktree remove --force "${selected_path}" >"${log_file}" 2>&1
+else
+  git -C "${repo_root}" worktree remove "${selected_path}" >"${log_file}" 2>&1
+fi
+status=$?
+
+if [[ "${status}" -eq 0 ]]; then
+  rm -f "${log_file}"
+  notify_tmux "Removed ${display_path}"
+else
+  notify_tmux "Failed removing ${display_path}; see ${log_file}"
+fi
+
+exit "${status}"
+' _ "${repo_root}" "${selected_path}" "${display_path}" "${remove_mode}" "${tmux_env}" "${log_file}" >/dev/null 2>&1 < /dev/null &
+}
+
+usage() {
+  cat <<'USAGE'
+Usage: git-worktree-remove [--sort name|recent]
+       git-worktree-remove help
+
+Shows removable Git worktrees for the current repository, then confirms removal
+with No / Yes / Force before scheduling background deletion.
+
+Options:
+  --sort name|recent   Sort alphabetically by path or by most recent commit time.
+                       Default: name
+  -h, --help           Show help.
+
+Behavior:
+  - The main worktree is never listed.
+  - The current worktree is never listed.
+  - q behaves like No and exits cleanly.
+  - Force runs git worktree remove --force.
+  - Removal runs in the background via nohup, so the command returns immediately.
+  - When run inside tmux, completion/failure is shown with a transient status message.
+USAGE
+}
+
+sort_mode="name"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --sort)
+      shift
+      [[ $# -gt 0 ]] || gwt_die "Option --sort requires a value."
+      sort_mode="$1"
+      ;;
+    --sort=*)
+      sort_mode="${1#*=}"
+      ;;
+    help|-h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      usage >&2
+      gwt_die "Unknown argument: $1"
+      ;;
+  esac
+  shift
+done
+
+case "${sort_mode}" in
+  name|recent)
+    ;;
+  *)
+    gwt_die "Invalid sort mode: ${sort_mode}"
+    ;;
+esac
+
+gwt_require_commands
+gwt_detect_repo_context
+gwt_has_tui_support || gwt_die "git-worktree-remove requires an interactive terminal."
+gwt_load_worktree_entries "0" "0" "${sort_mode}"
+
+if [[ ${#GWT_WORKTREE_ENTRIES[@]} -eq 0 ]]; then
+  printf 'No removable worktrees found. Main and current worktrees are omitted.\n' >&2
+  exit 0
+fi
+
+set +e
+selected_entry="$(gwt_pick_worktree_entry \
+  "Select a worktree to remove" \
+  "Main and current worktrees are omitted from this list." \
+  "Press q to leave everything in place." \
+  "${GWT_WORKTREE_ENTRIES[@]}")"
+pick_status=$?
+set -e
+
+if [[ ${pick_status} -eq 2 ]]; then
+  exit 0
+fi
+
+[[ ${pick_status} -eq 0 ]] || exit "${pick_status}"
+
+selected_path="$(gwt_entry_path "${selected_entry}")"
+selected_branch="$(gwt_entry_branch "${selected_entry}")"
+
+set +e
+confirm_choice="$(gwt_confirm_remove_choice "${selected_path}" "${selected_branch}")"
+confirm_status=$?
+set -e
+
+if [[ ${confirm_status} -eq 2 ]]; then
+  exit 0
+fi
+
+[[ ${confirm_status} -eq 0 ]] || exit "${confirm_status}"
+
+case "${confirm_choice}" in
+  No)
+    exit 0
+    ;;
+  Yes)
+    schedule_worktree_removal "${GWT_REPO_ROOT}" "${selected_path}" "$(gwt_entry_display_path "${selected_path}")" "normal"
+    ;;
+  Force)
+    schedule_worktree_removal "${GWT_REPO_ROOT}" "${selected_path}" "$(gwt_entry_display_path "${selected_path}")" "force"
+    ;;
+  *)
+    gwt_die "Unexpected confirmation choice: ${confirm_choice}"
+    ;;
+esac
+
+printf 'Scheduled removal of %s\n' "$(gwt_entry_display_path "${selected_path}")" >&2

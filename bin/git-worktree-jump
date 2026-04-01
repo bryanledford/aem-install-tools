@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=/dev/null
+source "${script_dir}/_git-worktree-common.sh"
+
+trap gwt_cleanup EXIT
+
+usage() {
+  cat <<'USAGE'
+Usage: git-worktree-jump [--sort name|recent]
+       git-worktree-jump help
+
+Shows the Git worktrees for the current repository and prints the selected
+worktree path to stdout.
+
+Options:
+  --sort name|recent   Sort alphabetically by path or by most recent commit time.
+                       Default: name
+  -h, --help           Show help.
+
+Notes:
+  - This command prints the selected path; it does not change the parent shell's
+    working directory on its own.
+  - Use a shell function wrapper when you want to cd directly.
+
+Example shell function:
+  wt() {
+    local dest
+    dest="$(git-worktree-jump "$@")" || return
+    [[ -n "$dest" ]] && cd "$dest"
+  }
+USAGE
+}
+
+sort_mode="name"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --sort)
+      shift
+      [[ $# -gt 0 ]] || gwt_die "Option --sort requires a value."
+      sort_mode="$1"
+      ;;
+    --sort=*)
+      sort_mode="${1#*=}"
+      ;;
+    help|-h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      usage >&2
+      gwt_die "Unknown argument: $1"
+      ;;
+  esac
+  shift
+done
+
+case "${sort_mode}" in
+  name|recent)
+    ;;
+  *)
+    gwt_die "Invalid sort mode: ${sort_mode}"
+    ;;
+esac
+
+gwt_require_commands
+gwt_detect_repo_context
+gwt_load_worktree_entries "1" "1" "${sort_mode}"
+
+if [[ ${#GWT_WORKTREE_ENTRIES[@]} -eq 0 ]]; then
+  gwt_die "No worktrees found for the current repository."
+fi
+
+if [[ ${#GWT_WORKTREE_ENTRIES[@]} -eq 1 ]] && ! gwt_has_tui_support; then
+  printf '%s\n' "$(gwt_entry_path "${GWT_WORKTREE_ENTRIES[0]}")"
+  exit 0
+fi
+
+gwt_has_tui_support || gwt_die "git-worktree-jump requires an interactive terminal when multiple worktrees are present."
+
+set +e
+selected_entry="$(gwt_pick_worktree_entry \
+  "Select a Git worktree" \
+  "Repository: $(gwt_entry_display_path "${GWT_REPO_ROOT}")" \
+  "Press q to leave without changing directories." \
+  "${GWT_WORKTREE_ENTRIES[@]}")"
+pick_status=$?
+set -e
+
+if [[ ${pick_status} -eq 2 ]]; then
+  exit 0
+fi
+
+[[ ${pick_status} -eq 0 ]] || exit "${pick_status}"
+
+printf '%s\n' "$(gwt_entry_path "${selected_entry}")"

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Bash/Zsh completion for aem-install, aem-package-install, aem-bundle-install
+# Bash/Zsh completion for aem-install, aem-package-install, aem-bundle-install,
+# git-worktree-jump, and git-worktree-remove
 #
 # To load in bash:
 #   source /path/to/aem-tools/completions/aem-tools-completion.bash
@@ -92,6 +93,30 @@ _aem_install_complete() {
               $(compgen -d -- "${cur}") )
 }
 
+_git_worktree_picker_complete() {
+  local cur prev
+  cur="${COMP_WORDS[COMP_CWORD]}"
+  prev="${COMP_WORDS[COMP_CWORD-1]}"
+
+  case "${prev}" in
+    --sort)
+      COMPREPLY=( $(compgen -W "name recent" -- "${cur}") )
+      return 0
+      ;;
+  esac
+
+  case "${cur}" in
+    -*)
+      COMPREPLY=( $(compgen -W "--sort --help -h" -- "${cur}") )
+      return 0
+      ;;
+  esac
+
+  COMPREPLY=()
+}
+
 complete -F _aem_package_install_complete aem-package-install
 complete -F _aem_bundle_install_complete  aem-bundle-install
 complete -F _aem_install_complete         aem-install
+complete -F _git_worktree_picker_complete git-worktree-jump
+complete -F _git_worktree_picker_complete git-worktree-remove

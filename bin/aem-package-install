@@ -213,6 +213,22 @@ supports_color() {
   return 0
 }
 
+supports_truecolor() {
+  case "${COLORTERM:-}" in
+    truecolor|24bit)
+      return 0
+      ;;
+  esac
+
+  case "${TERM:-}" in
+    *direct*|*truecolor*)
+      return 0
+      ;;
+  esac
+
+  return 1
+}
+
 curl_with_progress() {
   if has_status_tty; then
     curl --globoff -fS --progress-bar "$@"
@@ -277,13 +293,24 @@ interactive_pick_port() {
   if supports_color; then
     style_reset=$'\033[0m'
     style_dim=$'\033[2m'
-    style_title=$'\033[38;5;120;1m'
-    style_selected=$'\033[48;5;22m\033[38;5;157m\033[1m'
-    style_selected_port=$'\033[48;5;22m\033[38;5;194m\033[1m'
-    style_selected_label=$'\033[48;5;22m\033[38;5;151m'
-    style_unselected=$'\033[38;5;114m'
-    style_label=$'\033[38;5;108m'
-    style_hint=$'\033[38;5;108m'
+
+    if supports_truecolor; then
+      style_title=$'\033[38;2;122;162;247m\033[1m'
+      style_selected=$'\033[48;2;125;207;255m\033[38;2;26;27;38m\033[1m'
+      style_selected_port=$'\033[48;2;125;207;255m\033[38;2;15;15;20m\033[1m'
+      style_selected_label=$'\033[48;2;125;207;255m\033[38;2;36;40;59m'
+      style_unselected=$'\033[38;2;192;202;245m'
+      style_label=$'\033[38;2;122;162;247m'
+      style_hint=$'\033[38;2;169;177;214m'
+    else
+      style_title=$'\033[38;5;111m\033[1m'
+      style_selected=$'\033[48;5;117m\033[38;5;16m\033[1m'
+      style_selected_port=$'\033[48;5;117m\033[38;5;16m\033[1m'
+      style_selected_label=$'\033[48;5;117m\033[38;5;17m'
+      style_unselected=$'\033[38;5;153m'
+      style_label=$'\033[38;5;111m'
+      style_hint=$'\033[38;5;146m'
+    fi
   fi
 
   old_stty="$(stty -g)"
@@ -349,8 +376,7 @@ interactive_pick_port() {
         restore_terminal
         trap - INT TERM
         printf '\r\033[%dA\033[J' "$lines" >&2
-        echo "Selection cancelled." >&2
-        exit 1
+        return 2
         ;;
       $'\x1b')
         IFS= read -rsn1 key2 || true
@@ -387,7 +413,7 @@ pick_port() {
 
   if has_tui_support; then
     interactive_pick_port "${entries[@]}"
-    return
+    return $?
   fi
 
   while IFS= read -r entry; do
@@ -483,7 +509,14 @@ pkg="$1"
 [[ -f "$pkg" ]] || die "Package not found: $pkg"
 
 if [[ -z "$port" ]]; then
+  set +e
   port="$(pick_port)"
+  pick_port_status=$?
+  set -e
+  if [[ $pick_port_status -eq 2 ]]; then
+    exit 0
+  fi
+  [[ $pick_port_status -eq 0 ]] || exit "$pick_port_status"
 fi
 
 [[ "$port" =~ ^[1-9][0-9]{3,4}$ ]] || die "Invalid port: $port"
