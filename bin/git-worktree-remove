@@ -19,7 +19,7 @@ schedule_worktree_removal() {
   command -v mktemp >/dev/null 2>&1 || gwt_die "Required command not found: mktemp"
   command -v bash >/dev/null 2>&1 || gwt_die "Required command not found: bash"
 
-  log_file="$(mktemp "${TMPDIR:-/tmp}/git-worktree-remove-XXXXXX.log")"
+  log_file="$(mktemp "${TMPDIR:-/tmp}/git-worktree-remove.XXXXXX")"
 
   nohup bash -lc '
 repo_root="$1"
