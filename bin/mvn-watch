@@ -1,0 +1,130 @@
+#!/bin/bash
+set -euo pipefail
+
+usage() {
+  cat <<'USAGE'
+Usage: mvn-watch
+       mvn-watch --state-dir <path>
+       mvn-watch --lines <n>
+       mvn-watch help
+
+Watches the latest line from a backgrounded Maven build started by mvn-bg.
+You can stop watching with Ctrl-C and run mvn-watch again later to resume.
+
+Defaults:
+  state dir: .mvn-bg
+  final lines: 20
+
+Examples:
+  mvn-watch
+  mvn-watch --state-dir /tmp/my-build-state
+  mvn-watch --lines 40
+USAGE
+}
+
+state_dir=".mvn-bg"
+final_lines=20
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    help|--help)
+      usage
+      exit 0
+      ;;
+    --state-dir)
+      [[ $# -ge 2 ]] || {
+        echo "Error: --state-dir requires a value." >&2
+        exit 2
+      }
+      state_dir="$2"
+      shift 2
+      ;;
+    --lines)
+      [[ $# -ge 2 ]] || {
+        echo "Error: --lines requires a value." >&2
+        exit 2
+      }
+      final_lines="$2"
+      shift 2
+      ;;
+    *)
+      echo "Error: unknown argument: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+
+pid_file="${state_dir%/}/build.pid"
+status_file="${state_dir%/}/build.status"
+cmd_file="${state_dir%/}/build.command"
+cwd_file="${state_dir%/}/build.cwd"
+log_path_file="${state_dir%/}/build.log.path"
+log_file="${state_dir%/}/build.log"
+
+if [[ -f "$log_path_file" ]]; then
+  log_file="$(cat "$log_path_file")"
+fi
+
+[[ -f "$pid_file" ]] || {
+  echo "Error: no build PID found at $pid_file" >&2
+  exit 1
+}
+
+for _ in {1..20}; do
+  [[ -f "$log_file" ]] && break
+  sleep 0.1
+done
+
+[[ -f "$log_file" ]] || {
+  echo "Error: no build log found at $log_file" >&2
+  exit 1
+}
+
+pid="$(cat "$pid_file")"
+cmd="$(cat "$cmd_file" 2>/dev/null || echo "mvn")"
+cwd="$(cat "$cwd_file" 2>/dev/null || pwd)"
+
+echo "Watching Maven build"
+echo "Command: $cmd"
+echo "Directory: $cwd"
+echo "Log: $log_file"
+echo "Press Ctrl-C to stop watching without stopping the build."
+
+render_last_line() {
+  local term_width max_log_length log_line
+  term_width="$(tput cols 2>/dev/null || echo 120)"
+  max_log_length=$((term_width - 1))
+  (( max_log_length < 20 )) && max_log_length=20
+  log_line="$(tail -n 1 "$log_file" 2>/dev/null | cut -c -"$max_log_length")"
+  printf '\r%s\033[K' "$log_line"
+}
+
+while kill -0 "$pid" 2>/dev/null; do
+  render_last_line
+  sleep 0.2
+done
+
+render_last_line
+printf '\n'
+
+status=""
+for _ in {1..10}; do
+  [[ -f "$status_file" ]] && break
+  sleep 0.1
+done
+
+if [[ -f "$status_file" ]]; then
+  status="$(tr -d '[:space:]' < "$status_file")"
+fi
+
+if [[ "$status" == "0" ]]; then
+  echo "Build succeeded."
+elif [[ -n "$status" ]]; then
+  echo "Build failed with exit code $status."
+else
+  echo "Build finished, but no exit code was recorded."
+fi
+
+echo
+tail -n "$final_lines" "$log_file"

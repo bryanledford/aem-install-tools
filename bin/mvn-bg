@@ -1,0 +1,115 @@
+#!/bin/bash
+set -euo pipefail
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+usage() {
+  cat <<'USAGE'
+Usage: mvn-bg [maven args...]
+       mvn-bg --log-file <path> [maven args...]
+       mvn-bg --state-dir <path> [maven args...]
+       mvn-bg help
+
+Starts a Maven build in the background and records lightweight state files
+so you can stop and resume watching it later with mvn-watch.
+
+Defaults:
+  state dir: .mvn-bg
+  log file:  .mvn-bg/build.log
+
+Examples:
+  mvn-bg clean install
+  mvn-bg -PautoInstallPackage clean install
+  mvn-bg --log-file /tmp/my-build.log clean verify
+  mvn-watch
+USAGE
+}
+
+state_dir=".mvn-bg"
+log_file=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    help|--help)
+      usage
+      exit 0
+      ;;
+    --state-dir)
+      [[ $# -ge 2 ]] || {
+        echo "Error: --state-dir requires a value." >&2
+        exit 2
+      }
+      state_dir="$2"
+      shift 2
+      ;;
+    --log-file)
+      [[ $# -ge 2 ]] || {
+        echo "Error: --log-file requires a value." >&2
+        exit 2
+      }
+      log_file="$2"
+      shift 2
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+
+[[ $# -gt 0 ]] || {
+  echo "Error: no Maven arguments provided." >&2
+  usage >&2
+  exit 2
+}
+
+mvn_bin="$(command -v mvn || true)"
+[[ -n "$mvn_bin" ]] || {
+  echo "Error: could not find 'mvn' on PATH." >&2
+  exit 127
+}
+
+mkdir -p "$state_dir"
+
+if [[ -z "$log_file" ]]; then
+  log_file="${state_dir%/}/build.log"
+fi
+
+pid_file="${state_dir%/}/build.pid"
+status_file="${state_dir%/}/build.status"
+cmd_file="${state_dir%/}/build.command"
+cwd_file="${state_dir%/}/build.cwd"
+log_path_file="${state_dir%/}/build.log.path"
+
+if [[ -f "$pid_file" ]]; then
+  existing_pid="$(cat "$pid_file" 2>/dev/null || true)"
+  if [[ -n "$existing_pid" ]] && kill -0 "$existing_pid" 2>/dev/null; then
+    echo "Error: a tracked Maven build is already running with PID $existing_pid." >&2
+    echo "Use mvn-watch to attach to it, or remove ${state_dir%/} if it is stale." >&2
+    exit 1
+  fi
+fi
+
+mkdir -p "$(dirname "$log_file")"
+rm -f "$status_file"
+
+printf '%s\n' "$PWD" > "$cwd_file"
+printf '%s\n' "$log_file" > "$log_path_file"
+printf '%q' "$mvn_bin" > "$cmd_file"
+for arg in "$@"; do
+  printf ' %q' "$arg" >> "$cmd_file"
+done
+printf '\n' >> "$cmd_file"
+
+nohup "${script_dir}/_mvn-bg-runner" \
+  "$mvn_bin" \
+  "$log_file" \
+  "$status_file" \
+  "$@" >/dev/null 2>&1 &
+
+build_pid=$!
+printf '%s\n' "$build_pid" > "$pid_file"
+
+echo "Started Maven build in the background."
+echo "PID: $build_pid"
+echo "Log: $log_file"
+echo "Watch: mvn-watch --state-dir $state_dir"
