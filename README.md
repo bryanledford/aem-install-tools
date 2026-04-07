@@ -26,6 +26,10 @@ AEM package and bundle installs are common development tasks, but the default br
   Interactive picker that prints a selected worktree path so shell wrappers can `cd` there quickly.
 - `git-worktree-remove`
   Interactive picker for removable worktrees with a follow-up `No / Yes / Force` confirmation.
+- `mvn-bg`
+  Starts a Maven build in the background and records PID/log/status state for later viewing.
+- `mvn-watch`
+  Watches the latest log line from a `mvn-bg` build and can be stopped and resumed safely.
 
 ## Features
 
@@ -48,6 +52,8 @@ The simplest local setup is to keep the toolkit under a directory already on you
 ~/bin/aem-tools/bin/aem-install
 ~/bin/aem-tools/bin/aem-package-install
 ~/bin/aem-tools/bin/aem-bundle-install
+~/bin/aem-tools/bin/mvn-bg
+~/bin/aem-tools/bin/mvn-watch
 ~/bin/aem-tools/bin/git-worktree-jump
 ~/bin/aem-tools/bin/git-worktree-remove
 ```
@@ -90,6 +96,9 @@ aem-bundle-install --dry-run my-bundle.jar
 wt
 git-worktree-jump --sort recent
 git-worktree-remove
+
+mvn-bg clean install
+mvn-watch
 ```
 
 ## Command Behavior
@@ -130,6 +139,22 @@ git-worktree-remove
 - Confirms the selected removal with `No`, `Yes`, and `Force`.
 - `Force` maps to `git worktree remove --force`.
 - Treats `q` and `No` as clean no-op exits.
+
+### `mvn-bg`
+
+- Starts `mvn ...` in the background.
+- Stores run state under `.mvn-bg/` by default.
+- Writes the active wrapper PID to `.mvn-bg/build.pid`.
+- Streams Maven output to `.mvn-bg/build.log`.
+- Writes the Maven exit code to `.mvn-bg/build.status` when the build finishes.
+
+### `mvn-watch`
+
+- Reads state written by `mvn-bg`.
+- Shows only the latest log line in-place while the build is still running.
+- Exits automatically when the tracked build finishes.
+- Can be interrupted with `Ctrl-C` and run again later to resume watching.
+- Prints the final log tail and success or failure status once the build is done.
 
 ## Instance Detection
 
@@ -193,6 +218,9 @@ aem-tools/
     aem-install
     aem-package-install
     aem-bundle-install
+    _mvn-bg-runner
+    mvn-bg
+    mvn-watch
     git-worktree-jump
     git-worktree-remove
   completions/
@@ -212,6 +240,9 @@ bash -n \
   bin/aem-install \
   bin/aem-package-install \
   bin/aem-bundle-install \
+  bin/_mvn-bg-runner \
+  bin/mvn-bg \
+  bin/mvn-watch \
   bin/git-worktree-jump \
   bin/git-worktree-remove \
   bin/_git-worktree-common.sh
@@ -219,6 +250,9 @@ shellcheck \
   bin/aem-install \
   bin/aem-package-install \
   bin/aem-bundle-install \
+  bin/_mvn-bg-runner \
+  bin/mvn-bg \
+  bin/mvn-watch \
   bin/git-worktree-jump \
   bin/git-worktree-remove \
   bin/_git-worktree-common.sh
