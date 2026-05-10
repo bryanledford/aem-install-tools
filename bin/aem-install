@@ -17,6 +17,7 @@ Examples:
   aem-install my-bundle.jar
   aem-install --dry-run my-package.zip
   aem-install --no-refresh my-bundle.jar
+  aem-install -W my-package.zip
   aem-install -p 4502 my-package.zip
 
 Notes:
@@ -35,9 +36,7 @@ fi
 artifact=""
 for arg in "$@"; do
   case "$arg" in
-    -*)
-      ;;
-    *)
+    *.zip|*.jar)
       artifact="$arg"
       break
       ;;

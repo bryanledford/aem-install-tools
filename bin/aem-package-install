@@ -26,7 +26,7 @@ shell_quote() {
 
 usage() {
   cat <<'USAGE'
-Usage: aem-package-install [--dry-run] [--shallow] [--disable-workflows] [-p PORT] [-u USER] [-P PASS] [-l] package.zip
+Usage: aem-package-install [--dry-run] [--shallow] [--disable-workflows] [-W] [-p PORT] [-u USER] [-P PASS] [-l] package.zip
        aem-package-install help
 
 Installs an AEM content package using Package Manager with Extract Only,
@@ -36,6 +36,7 @@ Options:
   --dry-run            Show resolved settings and curl commands without executing them.
   --shallow            Do not extract embedded subpackages.
   --disable-workflows  Disable workflow launchers before install and re-enable after.
+  -W                   Short form of --disable-workflows.
   -p PORT              Target AEM port. If omitted, auto-detect running AEM instances.
   -u USER              Username. Default: admin
   -P PASS              Password. Default: admin
@@ -58,6 +59,7 @@ Examples:
   aem-package-install --dry-run my-package.zip
   aem-package-install --shallow my-package.zip
   aem-package-install --disable-workflows my-package.zip
+  aem-package-install -W my-package.zip
   aem-package-install -p 4502 my-package.zip
   aem-package-install -u admin -P admin my-package.zip
   aem-package-install -l
@@ -85,6 +87,13 @@ list_listening_ports_for_pid() {
   if command -v lsof >/dev/null 2>&1; then
     lsof -Pan -a -p "$pid" -iTCP -sTCP:LISTEN 2>/dev/null | \
       awk 'NR > 1 { n = split($9, parts, ":"); port = parts[n]; if (port ~ /^[0-9]+$/) print port }'
+  fi
+}
+
+list_java_listening_ports() {
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -nP -iTCP -sTCP:LISTEN 2>/dev/null | \
+      awk 'NR > 1 && $1 == "java" { n = split($9, parts, ":"); port = parts[n]; if (port ~ /^[0-9]+$/) print port }' || true
   fi
 }
 
@@ -125,27 +134,36 @@ is_probable_aem_port() {
 }
 
 list_process_entries() {
-  local line pid cmd explicit_port
+  local line pid cmd explicit_port ps_output
 
-  ps axww -o pid=,command= | while IFS= read -r line; do
-    pid="${line%% *}"
-    cmd="${line#"$pid"}"
-    cmd="${cmd# }"
+  ps_output="$(ps axww -o pid=,command= 2>/dev/null || true)"
 
-    is_aem_process_cmd "$cmd" || continue
+  if [[ -n "$ps_output" ]]; then
+    while IFS= read -r line; do
+      pid="${line%% *}"
+      cmd="${line#"$pid"}"
+      cmd="${cmd# }"
 
-    if explicit_port="$(extract_ports_from_cmd "$cmd")" && [[ -n "$explicit_port" ]]; then
+      is_aem_process_cmd "$cmd" || continue
+
+      if explicit_port="$(extract_ports_from_cmd "$cmd")" && [[ -n "$explicit_port" ]]; then
+        while IFS= read -r port; do
+          [[ -n "$port" ]] && printf '%s\t%s\n' "$port" "local"
+        done < <(printf '%s\n' "$explicit_port")
+        continue
+      fi
+
       while IFS= read -r port; do
-        [[ -n "$port" ]] && printf '%s\t%s\n' "$port" "local"
-      done < <(printf '%s\n' "$explicit_port")
-      continue
-    fi
-
+        [[ -n "$port" ]] || continue
+        is_probable_aem_port "$port" && printf '%s\t%s\n' "$port" "local"
+      done < <(list_listening_ports_for_pid "$pid")
+    done < <(printf '%s\n' "$ps_output")
+  else
     while IFS= read -r port; do
       [[ -n "$port" ]] || continue
       is_probable_aem_port "$port" && printf '%s\t%s\n' "$port" "local"
-    done < <(list_listening_ports_for_pid "$pid")
-  done || true
+    done < <(list_java_listening_ports)
+  fi
 
   return 0
 }
@@ -482,12 +500,13 @@ done
 
 set -- "${args[@]}"
 
-while getopts ":p:u:P:lh" opt; do
+while getopts ":p:u:P:lWh" opt; do
   case "$opt" in
     p) port="$OPTARG" ;;
     u) user="$OPTARG" ;;
     P) pass="$OPTARG" ;;
     l) list_only=1 ;;
+    W) disable_workflows=true ;;
     h) usage; exit 0 ;;
     :) echo "Option -$OPTARG requires a value." >&2; usage; exit 2 ;;
     \?) echo "Unknown option: -$OPTARG" >&2; usage; exit 2 ;;
@@ -565,7 +584,17 @@ fi
 if [[ "$disable_workflows" == true ]]; then
   printf 'Disabling workflow launchers...\n' >&2
   toggle_workflow_launchers disable
-  trap 'printf "Re-enabling workflow launchers...\n" >&2; toggle_workflow_launchers enable' EXIT
+  cleanup() {
+    printf 'Re-enabling workflow launchers...\n' >&2
+    toggle_workflow_launchers enable
+
+    local file
+    for file in "${tmp_files[@]:-}"; do
+      [[ -n "$file" && -e "$file" ]] && rm -f "$file"
+    done
+
+    return 0
+  }
 fi
 
 echo "Uploading package to AEM on port ${port}..." >&2

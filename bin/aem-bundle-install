@@ -9,6 +9,8 @@ cleanup() {
   for file in "${tmp_files[@]:-}"; do
     [[ -n "$file" && -e "$file" ]] && rm -f "$file"
   done
+
+  return 0
 }
 
 trap cleanup EXIT
@@ -24,7 +26,7 @@ shell_quote() {
 
 usage() {
   cat <<'USAGE'
-Usage: aem-bundle-install [--dry-run] [--no-refresh] [--no-start] [--start-level LEVEL] [-p PORT] [-u USER] [-P PASS] [-l] bundle.jar
+Usage: aem-bundle-install [--dry-run] [--no-refresh] [--no-start] [--start-level LEVEL] [--disable-workflows] [-W] [-p PORT] [-u USER] [-P PASS] [-l] bundle.jar
        aem-bundle-install help
 
 Installs or updates an OSGi bundle through the Felix Web Console.
@@ -34,6 +36,8 @@ Options:
   --no-refresh         Do not refresh packages after install/update.
   --no-start           Do not start newly installed bundles.
   --start-level LEVEL  Start level for newly installed bundles. Default: 20
+  --disable-workflows  Disable workflow launchers before install and re-enable after.
+  -W                   Short form of --disable-workflows.
   -p PORT              Target AEM port. If omitted, auto-detect running AEM instances.
   -u USER              Username. Default: admin
   -P PASS              Password. Default: admin
@@ -47,12 +51,16 @@ Behavior:
   - The upload/install request uses curl's progress bar when stderr is a TTY.
   - The Felix endpoint installs new bundles and updates existing bundles
     based on the uploaded bundle manifest.
+  - --disable-workflows disables WorkflowLauncherImpl and WorkflowLauncherListener
+    via the OSGi console before upload and re-enables them after install completes.
 
 Examples:
   aem-bundle-install my-bundle.jar
   aem-bundle-install --dry-run my-bundle.jar
   aem-bundle-install --no-refresh my-bundle.jar
   aem-bundle-install --no-start --start-level 15 my-bundle.jar
+  aem-bundle-install --disable-workflows my-bundle.jar
+  aem-bundle-install -W my-bundle.jar
   aem-bundle-install -p 4502 my-bundle.jar
   aem-bundle-install -l
 USAGE
@@ -371,6 +379,7 @@ refresh_packages=true
 bundle_start=true
 bundle_start_level=20
 dry_run=false
+disable_workflows=false
 
 if [[ ${1:-} == "help" ]]; then
   usage
@@ -402,6 +411,10 @@ while [[ $# -gt 0 ]]; do
       bundle_start_level="$2"
       shift 2
       ;;
+    --disable-workflows)
+      disable_workflows=true
+      shift
+      ;;
     --help)
       usage
       exit 0
@@ -424,12 +437,13 @@ done
 
 set -- "${args[@]}"
 
-while getopts ":p:u:P:lh" opt; do
+while getopts ":p:u:P:lWh" opt; do
   case "$opt" in
     p) port="$OPTARG" ;;
     u) user="$OPTARG" ;;
     P) pass="$OPTARG" ;;
     l) list_only=1 ;;
+    W) disable_workflows=true ;;
     h) usage; exit 0 ;;
     :) printf 'Option -%s requires a value.\n' "$OPTARG" >&2; usage >&2; exit 2 ;;
     \?) printf 'Unknown option: -%s\n' "$OPTARG" >&2; usage >&2; exit 2 ;;
@@ -468,6 +482,23 @@ fi
 base="http://localhost:${port}"
 bundle_url="${base}/system/console/bundles"
 
+_workflow_launcher_components=(
+  "com.adobe.granite.workflow.core.launcher.WorkflowLauncherImpl"
+  "com.adobe.granite.workflow.core.launcher.WorkflowLauncherListener"
+)
+
+toggle_workflow_launchers() {
+  local action="$1"
+  local component
+
+  for component in "${_workflow_launcher_components[@]}"; do
+    curl -sf -u "$user:$pass" \
+      "${base}/system/console/components/${component}" \
+      --data "action=${action}" >/dev/null \
+      || printf 'Warning: could not %s %s\n' "$action" "$component" >&2
+  done
+}
+
 if [[ "$dry_run" == true ]]; then
   printf 'Dry run: no changes will be made.\n' >&2
   printf 'Resolved bundle: %s\n' "$(shell_quote "$bundle")" >&2
@@ -475,6 +506,7 @@ if [[ "$dry_run" == true ]]; then
   printf 'Refresh packages: %s\n' "$refresh_packages" >&2
   printf 'Start bundle: %s\n' "$bundle_start" >&2
   printf 'Start level: %s\n' "$bundle_start_level" >&2
+  printf 'Disable workflows: %s\n' "$disable_workflows" >&2
   printf 'Bundle URL: %s\n' "$bundle_url" >&2
   printf 'Install command:\n' >&2
   printf '  curl --globoff -u %s -X POST -F action=install -F refreshPackages=%s -F bundlestart=%s -F bundlestartlevel=%s -F bundlefile=@%s %s\n' \
@@ -485,6 +517,22 @@ if [[ "$dry_run" == true ]]; then
     "$(shell_quote "$bundle")" \
     "$(shell_quote "$bundle_url")" >&2
   exit 0
+fi
+
+if [[ "$disable_workflows" == true ]]; then
+  printf 'Disabling workflow launchers...\n' >&2
+  toggle_workflow_launchers disable
+  cleanup() {
+    printf 'Re-enabling workflow launchers...\n' >&2
+    toggle_workflow_launchers enable
+
+    local file
+    for file in "${tmp_files[@]:-}"; do
+      [[ -n "$file" && -e "$file" ]] && rm -f "$file"
+    done
+
+    return 0
+  }
 fi
 
 echo "Uploading and installing bundle to AEM on port ${port}..." >&2
